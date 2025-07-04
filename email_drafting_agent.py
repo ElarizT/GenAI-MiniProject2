@@ -51,7 +51,7 @@ class EmailDraftingAgent:
             return None
         
         prompt = f"""
-        You are an expert email drafting assistant. Create a professional email based on the following inputs:
+        Create a professional email based on these inputs:
 
         Recipient Name: {recipient_name}
         Recipient Role: {recipient_role}
@@ -59,46 +59,112 @@ class EmailDraftingAgent:
         Key Details: {key_details}
         Tone: {tone}
 
-        Please create a well-structured email with:
-        1. A clear and relevant subject line
-        2. An appropriate greeting
-        3. A concise body that includes all key information in a natural flow
-        4. A professional closing
+        Requirements:
+        1. Create a clear, relevant subject line
+        2. Use appropriate greeting for the recipient
+        3. Write a concise body that naturally incorporates all key details
+        4. End with a professional closing
 
-        Return the response in JSON format with the following structure:
+        CRITICAL: You must respond with ONLY a valid JSON object. No markdown formatting, no code blocks, no additional text. Just the JSON object.
+        
+        Format exactly like this:
         {{
-            "subject": "Email subject line",
-            "greeting": "Dear [Name] or appropriate greeting",
-            "body": "Main email content with proper paragraphs",
-            "closing": "Professional closing with signature line"
+            "subject": "Your subject line here",
+            "greeting": "Dear {recipient_name}," if name provided, otherwise "Dear Sir/Madam,",
+            "body": "Complete email body with all key details naturally integrated",
+            "closing": "Professional closing with signature placeholder"
         }}
-
-        Make sure the email sounds natural, professional, and includes all the key details provided.
+        
+        Do not include any text before or after the JSON. Do not wrap in markdown code blocks.
         """
         
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a professional email drafting assistant. Always respond with valid JSON format."},
+                    {"role": "system", "content": "You are a professional email drafting assistant. Always respond with valid JSON format only, no markdown formatting or additional text."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
                 max_tokens=1000
             )
             
+            # Get the raw response
+            raw_response = response.choices[0].message.content.strip()
+            
+            # Clean up the response - remove any markdown code blocks
+            cleaned_response = raw_response
+            if '```json' in cleaned_response:
+                cleaned_response = cleaned_response.split('```json')[1].split('```')[0].strip()
+            elif '```' in cleaned_response:
+                # Handle cases where there's just ``` without json
+                parts = cleaned_response.split('```')
+                if len(parts) >= 3:
+                    cleaned_response = parts[1].strip()
+                elif len(parts) == 2:
+                    cleaned_response = parts[1].strip()
+            
+            # Remove any leading/trailing whitespace and newlines
+            cleaned_response = cleaned_response.strip()
+            
             # Parse the JSON response
-            email_content = json.loads(response.choices[0].message.content)
-            return email_content
+            email_content = json.loads(cleaned_response)
+            
+            # Clean each field to ensure no JSON artifacts remain
+            cleaned_email = {}
+            for field in ['subject', 'greeting', 'body', 'closing']:
+                if field in email_content:
+                    value = str(email_content[field]).strip()
+                    # Remove any remaining JSON artifacts
+                    value = value.replace('```json', '').replace('```', '').strip()
+                    # Remove quotes if the entire string is quoted
+                    if value.startswith('"') and value.endswith('"'):
+                        value = value[1:-1]
+                    cleaned_email[field] = value
+            
+            # Validate that we have the required fields
+            required_fields = ['subject', 'greeting', 'body', 'closing']
+            if all(field in cleaned_email and cleaned_email[field] for field in required_fields):
+                return cleaned_email
+            else:
+                # If fields are missing, create a fallback structure
+                return {
+                    "subject": cleaned_email.get('subject', 'Email Draft'),
+                    "greeting": cleaned_email.get('greeting', f"Dear {recipient_name},"),
+                    "body": cleaned_email.get('body', cleaned_response),
+                    "closing": cleaned_email.get('closing', "Best regards,\n[Your Name]")
+                }
             
         except json.JSONDecodeError:
-            # Fallback if JSON parsing fails
+            # Fallback if JSON parsing fails - try to extract content manually
             raw_response = response.choices[0].message.content
+            
+            # Try to extract JSON from within the response
+            import re
+            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    email_content = json.loads(json_match.group())
+                    # Clean the extracted content
+                    cleaned_email = {}
+                    for field in ['subject', 'greeting', 'body', 'closing']:
+                        if field in email_content:
+                            value = str(email_content[field]).strip()
+                            value = value.replace('```json', '').replace('```', '').strip()
+                            if value.startswith('"') and value.endswith('"'):
+                                value = value[1:-1]
+                            cleaned_email[field] = value
+                    return cleaned_email
+                except:
+                    pass
+            
+            # Final fallback - create structured response from raw text
+            clean_text = raw_response.replace('```json', '').replace('```', '').strip()
             return {
-                "subject": "Email Draft",
-                "greeting": "Dear Recipient,",
-                "body": raw_response,
-                "closing": "Best regards,\nYour Name"
+                "subject": f"Re: {purpose}",
+                "greeting": f"Dear {recipient_name},",
+                "body": clean_text,
+                "closing": "Best regards,\n[Your Name]"
             }
         except Exception as e:
             st.error(f"Error generating email: {str(e)}")
@@ -108,53 +174,38 @@ def main():
     st.set_page_config(
         page_title="Email Drafting Agent",
         page_icon="📧",
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="collapsed"
     )
     
     st.title("📧 Email Drafting Agent")
     st.markdown("Transform bullet-point inputs into professional email drafts using AI")
     
-    # Initialize the agent
+    # Initialize the agent with environment variable API key
     groq_api_key = os.getenv('GROQ_API_KEY', '')
     
-    # Sidebar for API key configuration
-    with st.sidebar:
-        st.header("Configuration")
-        groq_api_key = st.text_input(
-            "Groq API Key",
-            type="password",
-            value=groq_api_key,
-            help="Enter your Groq API key"
-        )
-        
-        if not groq_api_key:
-            st.info("💡 Get your free API key from [Groq Console](https://console.groq.com/)")
-        
-        st.markdown("---")
-        st.markdown("### How to use:")
-        st.markdown("1. Enter recipient details")
-        st.markdown("2. Specify email purpose")
-        st.markdown("3. Add key points")
-        st.markdown("4. Choose tone")
-        st.markdown("5. Generate email draft")
+    # Check if API key is available and valid
+    if not groq_api_key:
+        st.error("❌ GROQ_API_KEY environment variable is not set. Please set your API key in the .env file.")
+        st.info("💡 Get your free API key from [Groq Console](https://console.groq.com/) and add it to your .env file")
+        st.stop()
     
-    # Initialize or update the agent with the API key
-    if groq_api_key and validate_api_key(groq_api_key) and ('agent' not in st.session_state or st.session_state.get('current_api_key') != groq_api_key):
+    if not validate_api_key(groq_api_key):
+        st.error("❌ Invalid API key format. Should start with 'gsk_'")
+        st.stop()
+    
+    # Initialize the agent
+    if 'agent' not in st.session_state:
         try:
             st.session_state.agent = EmailDraftingAgent(api_key=groq_api_key)
-            st.session_state.current_api_key = groq_api_key
-            if st.session_state.agent.client:
-                st.sidebar.success("✅ API key validated")
+            if not st.session_state.agent.client:
+                st.error("❌ Failed to initialize Groq client. Please check your API key.")
+                st.stop()
         except Exception as e:
-            st.sidebar.error(f"❌ Error initializing agent: {str(e)}")
-            st.session_state.agent = None
-    elif groq_api_key and not validate_api_key(groq_api_key):
-        st.sidebar.error("❌ Invalid API key format. Should start with 'gsk_'")
-        st.session_state.agent = None
-    elif not groq_api_key:
-        st.session_state.agent = None
+            st.error(f"❌ Error initializing agent: {str(e)}")
+            st.stop()
     
-    # Main interface
+    # Main interface - full width
     col1, col2 = st.columns([1, 1])
     
     with col1:
@@ -194,12 +245,8 @@ def main():
         
         # Generate button
         if st.button("✨ Generate Email Draft", type="primary"):
-            if not groq_api_key:
-                st.error("Please enter your Groq API key in the sidebar")
-            elif not all([recipient_name, purpose, key_details]):
+            if not all([recipient_name, purpose, key_details]):
                 st.error("Please fill in all required fields")
-            elif not st.session_state.get('agent') or not st.session_state.agent.client:
-                st.error("Agent not properly initialized. Please check your API key.")
             else:
                 with st.spinner("Generating email draft..."):
                     email_draft = st.session_state.agent.draft_email(
@@ -220,16 +267,55 @@ def main():
         if 'email_draft' in st.session_state:
             email = st.session_state.email_draft
             
+            # Validate and clean email content
+            subject = str(email.get('subject', 'Email Draft')).strip()
+            greeting = str(email.get('greeting', 'Dear Recipient,')).strip()
+            body = str(email.get('body', '')).strip()
+            closing = str(email.get('closing', 'Best regards,\n[Your Name]')).strip()
+            
+            # Additional cleaning to ensure no JSON artifacts remain
+            def clean_field(field_content):
+                """Clean any remaining JSON or markdown artifacts from a field"""
+                content = str(field_content).strip()
+                # Remove markdown code blocks
+                content = content.replace('```json', '').replace('```', '').strip()
+                # Remove quotes if the entire string is quoted
+                if content.startswith('"') and content.endswith('"'):
+                    content = content[1:-1]
+                return content
+            
+            subject = clean_field(subject)
+            greeting = clean_field(greeting)
+            body = clean_field(body)
+            closing = clean_field(closing)
+            
+            # Validate that none of the fields look like JSON or contain artifacts
+            def is_json_like(content):
+                """Check if content looks like JSON or contains JSON artifacts"""
+                content = str(content).strip()
+                return (content.startswith('{') and content.endswith('}')) or \
+                       content.startswith('```') or \
+                       '"subject"' in content or \
+                       '"greeting"' in content or \
+                       '"body"' in content or \
+                       '"closing"' in content
+            
+            # Check if any field contains JSON artifacts
+            if any(is_json_like(field) for field in [subject, greeting, body, closing]):
+                st.error("Email formatting error detected. Please try generating again.")
+                del st.session_state.email_draft
+                return
+            
             # Display the email
             st.subheader("Subject:")
-            st.code(email.get('subject', ''), language=None)
+            st.code(subject, language=None)
             
             st.subheader("Email Content:")
-            email_content = f"""{email.get('greeting', '')}
+            email_content = f"""{greeting}
 
-{email.get('body', '')}
+{body}
 
-{email.get('closing', '')}"""
+{closing}"""
             
             st.text_area(
                 "Full Email Draft",
