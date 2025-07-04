@@ -8,10 +8,26 @@ from typing import Dict, Any
 # Load environment variables
 load_dotenv()
 
+# Add API key validation
+def validate_api_key(api_key: str) -> bool:
+    """Validate if the API key format looks correct"""
+    return api_key and api_key.startswith('gsk_') and len(api_key) > 20
+
 class EmailDraftingAgent:
-    def __init__(self):
-        self.client = Groq(api_key=os.getenv('GROQ_API_KEY'))
-        self.model = "llama-3.3-70b-versatile"
+    def __init__(self, api_key=None):
+        # Get API key from parameter or environment
+        self.api_key = api_key or os.getenv('GROQ_API_KEY')
+        
+        # Initialize client only if API key is available
+        if self.api_key:
+            try:
+                self.client = Groq(api_key=self.api_key)
+                self.model = "llama-3.3-70b-versatile"
+            except Exception as e:
+                st.error(f"Error initializing Groq client: {str(e)}")
+                self.client = None
+        else:
+            self.client = None
     
     def draft_email(self, recipient_name: str, recipient_role: str, purpose: str, 
                    key_details: str, tone: str = "professional") -> Dict[str, str]:
@@ -28,6 +44,11 @@ class EmailDraftingAgent:
         Returns:
             Dict containing subject, greeting, body, and closing
         """
+        
+        # Check if client is initialized
+        if not self.client:
+            st.error("Groq client not initialized. Please check your API key.")
+            return None
         
         prompt = f"""
         You are an expert email drafting assistant. Create a professional email based on the following inputs:
@@ -94,8 +115,7 @@ def main():
     st.markdown("Transform bullet-point inputs into professional email drafts using AI")
     
     # Initialize the agent
-    if 'agent' not in st.session_state:
-        st.session_state.agent = EmailDraftingAgent()
+    groq_api_key = os.getenv('GROQ_API_KEY', '')
     
     # Sidebar for API key configuration
     with st.sidebar:
@@ -103,13 +123,12 @@ def main():
         groq_api_key = st.text_input(
             "Groq API Key",
             type="password",
-            value=os.getenv('GROQ_API_KEY', ''),
+            value=groq_api_key,
             help="Enter your Groq API key"
         )
         
-        if groq_api_key:
-            os.environ['GROQ_API_KEY'] = groq_api_key
-            st.session_state.agent = EmailDraftingAgent()
+        if not groq_api_key:
+            st.info("💡 Get your free API key from [Groq Console](https://console.groq.com/)")
         
         st.markdown("---")
         st.markdown("### How to use:")
@@ -118,6 +137,22 @@ def main():
         st.markdown("3. Add key points")
         st.markdown("4. Choose tone")
         st.markdown("5. Generate email draft")
+    
+    # Initialize or update the agent with the API key
+    if groq_api_key and validate_api_key(groq_api_key) and ('agent' not in st.session_state or st.session_state.get('current_api_key') != groq_api_key):
+        try:
+            st.session_state.agent = EmailDraftingAgent(api_key=groq_api_key)
+            st.session_state.current_api_key = groq_api_key
+            if st.session_state.agent.client:
+                st.sidebar.success("✅ API key validated")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error initializing agent: {str(e)}")
+            st.session_state.agent = None
+    elif groq_api_key and not validate_api_key(groq_api_key):
+        st.sidebar.error("❌ Invalid API key format. Should start with 'gsk_'")
+        st.session_state.agent = None
+    elif not groq_api_key:
+        st.session_state.agent = None
     
     # Main interface
     col1, col2 = st.columns([1, 1])
@@ -163,6 +198,8 @@ def main():
                 st.error("Please enter your Groq API key in the sidebar")
             elif not all([recipient_name, purpose, key_details]):
                 st.error("Please fill in all required fields")
+            elif not st.session_state.get('agent') or not st.session_state.agent.client:
+                st.error("Agent not properly initialized. Please check your API key.")
             else:
                 with st.spinner("Generating email draft..."):
                     email_draft = st.session_state.agent.draft_email(
